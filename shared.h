@@ -1,53 +1,92 @@
 #pragma once
 
-#include "sw_fwd.h"
+#include "sw_fwd.h"  // Forward declaration
 
-#include <cstddef>
-#include <memory>
+#include <cstddef>  // std::nullptr_t
 
-template<typename T>
+template <typename T>
 class SharedPtr {
-    template<typename Y>
+public:
+    template <typename U>
     friend class SharedPtr;
-
-    template<typename Y>
+    template <typename U>
     friend class WeakPtr;
+
 public:
 
     SharedPtr() {
-        control_block_ = nullptr;
-        ptr_ = nullptr;
     }
 
     SharedPtr(std::nullptr_t) {
-        control_block_ = nullptr;
-        ptr_ = nullptr;
     }
 
-    explicit SharedPtr(T *ptr) {
-        control_block_ = new ControlBlockHeap<T>(ptr);
+    explicit SharedPtr(T* ptr) {
+        control_block_ = new ControlBlockIndirect<T>(ptr);
+        control_block_->IncRefStrong();
         ptr_ = ptr;
+
+        if constexpr (std::is_convertible_v<T*, ESFTBase*>) {
+            ptr_->ptr_.control_block_ = control_block_;
+            ptr_->ptr_.ptr_ = ptr_;
+        }
     }
 
-    template<typename Y>
-    SharedPtr(Y *ptr) {
-        control_block_ = new ControlBlockHeap<Y>(ptr);
+    explicit SharedPtr(IControlBlock* control_block, T* ptr) {
+        control_block_ = control_block;
+        control_block_->IncRefStrong();
         ptr_ = ptr;
+
+        if constexpr (std::is_convertible_v<T*, ESFTBase*>) {
+            ptr_->ptr_.control_block_ = control_block_;
+            ptr_->ptr_.ptr_ = ptr_;
+        }
     }
 
-    explicit SharedPtr(ControlBlockStack<T> *ptr) {
-        control_block_ = ptr;
-        ptr_ = ptr->GetPtr();
+    template <typename Y>
+    explicit SharedPtr(IControlBlock* control_block, Y* ptr) {
+        control_block_ = control_block;
+        control_block_->IncRefStrong();
+        ptr_ = ptr;
+
+        if constexpr (std::is_convertible_v<Y*, ESFTBase*>) {
+            ptr_->ptr_.control_block_ = control_block_;
+            ptr_->ptr_.ptr_ = ptr_;
+        }
     }
 
-    SharedPtr(const SharedPtr &other) {
+    template <typename Y>
+    explicit SharedPtr(Y* ptr) {
+        control_block_ = new ControlBlockIndirect<Y>(ptr);
+        control_block_->IncRefStrong();
+        ptr_ = ptr;
+
+        if constexpr (std::is_convertible_v<Y*, ESFTBase*>) {
+            ptr_->ptr_.control_block_ = control_block_;
+            ptr_->ptr_.ptr_ = ptr_;
+        }
+    }
+
+    template <typename U>
+    SharedPtr(const SharedPtr<U>& other) {
         control_block_ = other.control_block_;
         ptr_ = other.ptr_;
 
-        IncreaseCounter();
+        if (control_block_) {
+            control_block_->IncRefStrong();
+        }
     }
 
-    SharedPtr(SharedPtr &&other) {
+    SharedPtr(const SharedPtr& other) {
+        control_block_ = other.control_block_;
+        ptr_ = other.ptr_;
+
+        if (control_block_) {
+            control_block_->IncRefStrong();
+        }
+    }
+
+    template <typename U>
+    SharedPtr(SharedPtr<U>&& other) {
         control_block_ = other.control_block_;
         ptr_ = other.ptr_;
 
@@ -55,16 +94,7 @@ public:
         other.ptr_ = nullptr;
     }
 
-    template<typename Y>
-    SharedPtr(const SharedPtr<Y> &other) {
-        control_block_ = other.control_block_;
-        ptr_ = other.ptr_;
-
-        IncreaseCounter();
-    }
-
-    template<typename Y>
-    SharedPtr(SharedPtr<Y> &&other) {
+    SharedPtr(SharedPtr&& other) {
         control_block_ = other.control_block_;
         ptr_ = other.ptr_;
 
@@ -72,44 +102,55 @@ public:
         other.ptr_ = nullptr;
     }
 
-    template<typename Y>
-    SharedPtr(const SharedPtr<Y> &other, T *ptr) {
+    template <typename Y>
+    SharedPtr(const SharedPtr<Y>& other, T* ptr) {
         control_block_ = other.control_block_;
         ptr_ = ptr;
-        IncreaseCounter();
+
+        if (control_block_) {
+            control_block_->IncRefStrong();
+        }
     }
 
-    explicit SharedPtr(const WeakPtr<T> &other) {
+    explicit SharedPtr(const WeakPtr<T>& other) {
+        control_block_ = other.control_block_;
+        ptr_ = other.ptr_;
+
         if (other.Expired()) {
             throw BadWeakPtr();
         }
 
-        control_block_ = other.control_block_;
-        ptr_ = other.ptr_;
-        IncreaseCounter();
+        if (control_block_) {
+            control_block_->IncRefStrong();
+        }
     }
 
-    SharedPtr &operator=(const SharedPtr &other) {
-        if (this == &other) {
-            return *this;
-        }
-
-        DecreaseCounter();
-
+    template <typename U>
+    SharedPtr& operator=(const SharedPtr<U>& other) {
+        DecRef();
         control_block_ = other.control_block_;
         ptr_ = other.ptr_;
-
-        IncreaseCounter();
-
+        if (control_block_) {
+            control_block_->IncRefStrong();
+        }
         return *this;
     }
 
-    SharedPtr &operator=(SharedPtr &&other) {
-        if (this == &other) {
-            return *this;
+    SharedPtr& operator=(const SharedPtr& other) {
+        if (this != &other) {
+            DecRef();
+            control_block_ = other.control_block_;
+            ptr_ = other.ptr_;
+            if (control_block_) {
+                control_block_->IncRefStrong();
+            }
         }
+        return *this;
+    }
 
-        DecreaseCounter();
+    template <typename U>
+    SharedPtr& operator=(SharedPtr<U>&& other) {
+        DecRef();
 
         control_block_ = other.control_block_;
         ptr_ = other.ptr_;
@@ -120,95 +161,91 @@ public:
         return *this;
     }
 
-    void IncreaseCounter() {
-        if (control_block_ == nullptr) {
-            return;
+    SharedPtr& operator=(SharedPtr&& other) {
+        if (this != &other) {
+            DecRef();
+
+            control_block_ = other.control_block_;
+            ptr_ = other.ptr_;
+
+            other.control_block_ = nullptr;
+            other.ptr_ = nullptr;
         }
 
-        control_block_->IncreaseStrongCounter();
-    }
-
-    void DecreaseCounter() {
-        if (control_block_ == nullptr) {
-            return;
-        }
-
-        control_block_->DecreaseStrongCounter();
-
-        if (UseCount() == 0 && UseCountWeak() == 0) {
-            delete control_block_;
-        }
-
-        control_block_ = nullptr;
-        ptr_ = nullptr;
-    }
-
-    size_t UseCount() const {
-        if (control_block_ == nullptr) {
-            return 0;
-        }
-
-        return control_block_->UseCountStrong();
-    }
-
-    size_t UseCountWeak() const {
-        if (control_block_ == nullptr) {
-            return 0;
-        }
-
-        return control_block_->UseCountWeak();
+        return *this;
     }
 
     ~SharedPtr() {
-        DecreaseCounter();
+        DecRef();
     }
 
     void Reset() {
-        DecreaseCounter();
-        control_block_ = nullptr;
-        ptr_ = nullptr;
+        DecRef();
     }
 
-    void Reset(T *ptr) {
-        DecreaseCounter();
-        control_block_ = new ControlBlockHeap<T>(ptr);
+    void Reset(T* ptr) {
+        DecRef();
+
+        control_block_ = new ControlBlockIndirect<T>(ptr);
+        control_block_->IncRefStrong();
         ptr_ = ptr;
     }
 
-    template<typename Y>
-    void Reset(Y *ptr) {
-        DecreaseCounter();
-        control_block_ = new ControlBlockHeap<Y>(ptr);
+    template <typename U>
+    void Reset(U* ptr) {
+        DecRef();
+
+        control_block_ = new ControlBlockIndirect<U>(ptr);
+        control_block_->IncRefStrong();
         ptr_ = ptr;
     }
 
-    void Swap(SharedPtr &other) {
+    void Swap(SharedPtr& other) {
         std::swap(control_block_, other.control_block_);
         std::swap(ptr_, other.ptr_);
     }
 
-    T *Get() const {
+    T* Get() const {
         return ptr_;
     }
 
-    T &operator*() const {
+    T& operator*() const {
         return *ptr_;
     }
-
-    T *operator->() const {
+    T* operator->() const {
         return ptr_;
     }
-
+    size_t UseCount() const {
+        return control_block_ ? control_block_->RefCount() : 0;
+    }
     explicit operator bool() const {
-        return ptr_ != nullptr;
+        return control_block_;
+    }
+
+    template <typename U>
+    bool operator==(const SharedPtr<U>& right) const {
+        return control_block_ == right.control_block_ && ptr_ == right.ptr_;
     }
 
 private:
-    ControlBlock *control_block_;
-    T *ptr_;
+    void DecRef() {
+        if (control_block_) {
+            control_block_->DecRefStrong();
+            if (control_block_->TotalCount() == 0) {
+                delete control_block_;
+            }
+            control_block_ = nullptr;
+            ptr_ = nullptr;
+        }
+    }
+
+private:
+    IControlBlock* control_block_ = nullptr;
+    T* ptr_ = nullptr;
 };
 
-template<typename T, typename... Args>
-SharedPtr<T> MakeShared(Args &&... args) {
-    return SharedPtr<T>(new ControlBlockStack<T>(std::forward<Args>(args)...));
+template <typename T, typename... Args>
+SharedPtr<T> MakeShared(Args&&... args) {
+    auto block = new ControlBlockDirect<T>(std::forward<Args>(args)...);
+    return SharedPtr<T>(block, block->GetRef());
 }

@@ -1,130 +1,137 @@
 #pragma once
 
 #include <exception>
+#include <memory>
 
-class BadWeakPtr : public std::exception {
-};
+class BadWeakPtr : public std::exception {};
 
-template<typename T>
+template <typename T>
 class SharedPtr;
 
-template<typename T>
+template <typename T>
 class WeakPtr;
 
+class ESFTBase {};
 
-class ControlBlock {
+class IControlBlock {
 public:
-
-    virtual ~ControlBlock() = default;
-
-private:
-    virtual void Destroy() = 0;
-
-public:
-    void IncreaseStrongCounter() {
-        ++cnt_strong_;
+    void IncRefStrong() {
+        ++counter_strong_;
+        ++counter_total_;
     }
-
-    void IncreaseWeakCounter() {
-        ++cnt_weak_;
-    }
-
-    void DecreaseStrongCounter() {
-        --cnt_strong_;
-        if (cnt_strong_ == 0) {
+    void DecRefStrong() {
+        --counter_strong_;
+        --counter_total_;
+        if (counter_strong_ == 0) {
             Destroy();
         }
     }
 
-    void DecreaseWeakCounter() {
-        --cnt_weak_;
+    void IncRefWeak() {
+        ++counter_total_;
     }
 
-    size_t UseCountStrong() const {
-        return cnt_strong_;
+    void DecRefWeak() {
+        --counter_total_;
     }
 
-    size_t UseCountWeak() const {
-        return cnt_weak_;
+    size_t RefCount() {
+        return counter_strong_;
+    }
+
+    size_t TotalCount() {
+        return counter_total_;
+    }
+
+    virtual ~IControlBlock() {
     }
 
 private:
-    size_t cnt_strong_;
-    size_t cnt_weak_;
+    virtual void Destroy() = 0;
+
+private:
+    size_t counter_strong_ = 0;
+    size_t counter_total_ = 0;
 };
 
-template<typename T>
-class ControlBlockHeap : public ControlBlock {
+template <typename T>
+class ControlBlockIndirect : public IControlBlock {
 public:
-    ControlBlockHeap(T *ptr) {
-        cnt_strong_ = 1;
-        cnt_weak_ = 0;
-        ptr_ = ptr;
+    ControlBlockIndirect(T* ptr) : ptr_(ptr) {
     }
 
-    ControlBlockHeap(const ControlBlockHeap &other) {
-        cnt_strong_ = other.cnt_strong_;
-        ptr_ = other.ptr_;
-    }
-
-    template<typename Y>
-    ControlBlockHeap(const ControlBlockHeap<Y> &other) {
-        cnt_strong_ = other.cnt_strong_;
-        ptr_ = other.ptr_;
-    }
-
-    ControlBlockHeap &operator=(const ControlBlockHeap &other) {
-        if (this == &other) {
-            return *this;
-        }
-
-        cnt_strong_ = other.cnt_strong_;
-        ptr_ = other.ptr_;
-
-        return *this;
-    }
-
-    template<typename Y>
-    ControlBlockHeap &operator=(const ControlBlockHeap<Y> &other) {
-        if (this == &other) {
-            return *this;
-        }
-
-        cnt_strong_ = other.cnt_strong_;
-        ptr_ = other.ptr_;
-
-        return *this;
+    T* GetRef() {
+        return ptr_;
     }
 
 private:
     void Destroy() override {
-        delete ptr_;
+        if (ptr_) {
+            if constexpr (std::is_convertible_v<T*, ESFTBase*>) {
+                ptr_->ptr_.ForceDestruct();
+            }
+            delete ptr_;
+        }
+        ptr_ = nullptr;
     }
 
 private:
-    T *ptr_;
+    T* ptr_;
 };
 
-template<typename T>
-class ControlBlockStack : public ControlBlock {
+template <typename T>
+class ControlBlockDirect : public IControlBlock {
 public:
-    template<typename... Args>
-    ControlBlockStack(Args &&... args) {
-        cnt_strong_ = 1;
-        cnt_weak_ = 0;
-        ::new(&ptr_) T(std::forward<Args>(args)...);
+    template <typename... Args>
+    ControlBlockDirect(Args&&... args) {
+        ::new (&data_) T(std::forward<Args>(args)...);
     }
 
-    T *GetPtr() {
-        return reinterpret_cast<T *>(&ptr_);
+    T* GetRef() {
+        return reinterpret_cast<T*>(&data_);
     }
 
 private:
     void Destroy() override {
-        std::destroy_at(std::launder(reinterpret_cast<T *>(&ptr_)));
+        if constexpr (std::is_convertible_v<T*, ESFTBase*>) {
+            (reinterpret_cast<T*>(&data_))->ptr_.ForceDestruct();
+        }
+        std::destroy_at(std::launder(reinterpret_cast<T*>(&data_)));
     }
 
+private:
+    std::aligned_storage_t<sizeof(T), alignof(T)> data_;
+};
+
+
+template <typename T>
+class EnableSharedFromThis : public ESFTBase {
+public:
+    template <typename U>
+    friend class SharedPtr;
+    template <typename U>
+    friend class WeakPtr;
+
+    template <typename U>
+    friend class ControlBlockDirect;
+    template <typename U>
+    friend class ControlBlockIndirect;
+
+public:
+    SharedPtr<T> SharedFromThis() {
+        return SharedPtr<T>(ptr_);
+    }
+    SharedPtr<const T> SharedFromThis() const {
+        return SharedPtr<const T>(ptr_);
+    }
+
+    WeakPtr<T> WeakFromThis() noexcept {
+        return WeakPtr<T>(ptr_);
+    }
+    WeakPtr<const T> WeakFromThis() const noexcept {
+        return WeakPtr<const T>(ptr_);
+    }
 
 private:
-    std::aligned_storage_t<sizeof(T), alignof(T)> ptr_;
+    WeakPtr<T> ptr_;
 };

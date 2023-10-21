@@ -1,36 +1,50 @@
 #pragma once
 
-#include "sw_fwd.h"
-#include "shared.h"
+#include "sw_fwd.h"  // Forward declaration
+
 
 template <typename T>
 class WeakPtr {
 public:
-    template <typename Y>
+    template <typename U>
     friend class SharedPtr;
-
-    template <typename Y>
+    template <typename U>
     friend class WeakPtr;
+
+    template <typename U>
+    friend class ControlBlockDirect;
+    template <typename U>
+    friend class ControlBlockIndirect;
 
 public:
 
     WeakPtr() {
-        control_block_ = nullptr;
-        ptr_ = nullptr;
+    }
+
+    template <typename U>
+    WeakPtr(const WeakPtr<U>& other) {
+        control_block_ = other.control_block_;
+        ptr_ = other.ptr_;
+        if (control_block_) {
+            control_block_->IncRefWeak();
+        }
     }
 
     WeakPtr(const WeakPtr& other) {
         control_block_ = other.control_block_;
         ptr_ = other.ptr_;
-        IncreaseCounter();
+        if (control_block_) {
+            control_block_->IncRefWeak();
+        }
     }
 
-    template <typename Y>
-    WeakPtr(const WeakPtr<Y>& other) {
+    template <typename U>
+    WeakPtr(WeakPtr<U>&& other) {
         control_block_ = other.control_block_;
         ptr_ = other.ptr_;
 
-        IncreaseCounter();
+        other.control_block_ = nullptr;
+        other.ptr_ = nullptr;
     }
 
     WeakPtr(WeakPtr&& other) {
@@ -41,109 +55,116 @@ public:
         other.ptr_ = nullptr;
     }
 
-    template <typename Y>
-    WeakPtr(WeakPtr<Y>&& other) {
+    template <typename U>
+    WeakPtr(const SharedPtr<U>& other) {
         control_block_ = other.control_block_;
         ptr_ = other.ptr_;
 
-        other.control_block_ = nullptr;
-        other.ptr_ = nullptr;
+        if (control_block_) {
+            control_block_->IncRefWeak();
+        }
     }
 
     WeakPtr(const SharedPtr<T>& other) {
         control_block_ = other.control_block_;
         ptr_ = other.ptr_;
-        IncreaseCounter();
+
+        if (control_block_) {
+            control_block_->IncRefWeak();
+        }
     }
 
-    WeakPtr& operator=(const WeakPtr& other) {
-        if (this == &other) {
-            return *this;
-        }
-
-        DecreaseCounter();
-
+    template <typename U>
+    WeakPtr& operator=(const WeakPtr<U>& other) {
+        DecRef();
         control_block_ = other.control_block_;
         ptr_ = other.ptr_;
-
-        IncreaseCounter();
+        if (control_block_) {
+            control_block_->IncRefWeak();
+        }
 
         return *this;
     }
 
-    WeakPtr& operator=(WeakPtr&& other) {
-        if (this == &other) {
-            return *this;
+    WeakPtr& operator=(const WeakPtr& other) {
+        if (this != &other) {
+            DecRef();
+            control_block_ = other.control_block_;
+            ptr_ = other.ptr_;
+            if (control_block_) {
+                control_block_->IncRefWeak();
+            }
         }
 
-        DecreaseCounter();
+        return *this;
+    }
+
+    template <typename U>
+    WeakPtr& operator=(WeakPtr<U>&& other) {
+        DecRef();
 
         control_block_ = other.control_block_;
         ptr_ = other.ptr_;
-
         other.control_block_ = nullptr;
         other.ptr_ = nullptr;
 
         return *this;
     }
 
+    WeakPtr& operator=(WeakPtr&& other) {
+        if (this != &other) {
+            DecRef();
+
+            control_block_ = other.control_block_;
+            ptr_ = other.ptr_;
+            other.control_block_ = nullptr;
+            other.ptr_ = nullptr;
+        }
+
+        return *this;
+    }
+
     ~WeakPtr() {
-        DecreaseCounter();
+        DecRef();
     }
 
     void Reset() {
-        DecreaseCounter();
-        control_block_ = nullptr;
-        ptr_ = nullptr;
+        DecRef();
     }
-
     void Swap(WeakPtr& other) {
         std::swap(control_block_, other.control_block_);
         std::swap(ptr_, other.ptr_);
     }
 
-    void IncreaseCounter() {
-        if (control_block_ == nullptr) {
-            return;
-        }
-
-        control_block_->IncreaseWeakCounter();
+    size_t UseCount() const {
+        return control_block_ ? control_block_->RefCount() : 0;
+    }
+    bool Expired() const {
+        return UseCount() == 0;
+    }
+    SharedPtr<T> Lock() const {
+        return Expired() ? SharedPtr<T>() : SharedPtr<T>(*this);
     }
 
-    void DecreaseCounter() {
-        if (control_block_ == nullptr) {
-            return;
+private:
+    void DecRef() {
+        if (control_block_) {
+            control_block_->DecRefWeak();
+            if (control_block_->TotalCount() == 0) {
+                delete control_block_;
+            }
+            control_block_ = nullptr;
+            ptr_ = nullptr;
         }
+    }
 
-        control_block_->DecreaseWeakCounter();
-
-        if (control_block_->UseCountWeak() == 0 && control_block_->UseCountStrong() == 0) {
-            delete control_block_;
-        }
-
+private:
+    void ForceDestruct() {
         control_block_ = nullptr;
         ptr_ = nullptr;
     }
 
-    size_t UseCount() const {
-        if (control_block_ == nullptr) {
-            return 0;
-        }
-        return control_block_->UseCountStrong();
-    }
-
-    bool Expired() const {
-        return UseCount() == 0;
-    }
-
-    SharedPtr<T> Lock() const {
-        if (Expired()) {
-            return SharedPtr<T>();
-        }
-        return SharedPtr<T>(*this);
-    }
-
 private:
-    ControlBlock* control_block_;
-    T* ptr_;
+    IControlBlock* control_block_ = nullptr;
+    T* ptr_ = nullptr;
 };
